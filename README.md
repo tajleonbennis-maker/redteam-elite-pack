@@ -4,18 +4,21 @@
 
 ## 解决的两件事（对应需求）
 
-1. **复刻攻击、直接复用、降 token**：`attack_pack.json` 固化了 12 个在 DeepSeek 验证过的高 ASR 攻击（真实 garak prompt），下次扫新模型直接套用，省去全量探测。
+1. **复刻攻击、直接复用、降 token**：`attack_pack.json` 固化了在 DeepSeek 验证过的高 ASR 攻击（真实 garak prompt），下次扫新模型直接套用，省去全量探测。
 2. **对已发现漏洞做进一步利用**：引擎对命中的漏洞自动生成**利用链 PoC**（DAN 越狱 → 借人格生成 RCE/SQL → 坏字符绕过过滤）。
+3. **对齐业界标准**：攻击包按 **OWASP LLM Top 10 (2025) + Agentic Top 10 (ASI01–10)** 打标签，扫完直接出「OWASP 覆盖度」章节，一眼看清模型在每类风险上的失守情况。
 
 ## 架构
 
 ```
 attack_pack/
-├── attack_pack.json      # 精英攻击包（12 个真实 garak 攻击，含 detector 口径）
-├── build_pack.py         # 从 garak 源码重建攻击包（可随 garak 升级重跑）
-├── redteam_engine.py     # 轻量复现引擎（脱离 garak，本地关键词 detector）
-├── format_report.py      # 把 profile.json 整理成易读报告 + 结构化 summary.json
-├── profile/              # 扫描产物（见下）
+├── attack_pack.json      # 精英攻击包 v2.0（24 个攻击，覆盖 OWASP LLM01-10 + ASI01-10）
+├── build_pack.py         # 从 garak 源码重建攻击包 v1（已验证项）
+├── build_pack_v2.py      # 注入 OWASP 标签 + 新增 garak 提取项（v2）
+├── redteam_engine.py     # 轻量复现引擎（脱离 garak，本地关键词 detector，支持 --owasp 过滤）
+├── format_report.py      # 整理成易读报告（含 OWASP 覆盖度章节）+ 结构化 summary.json
+├── owasp_mapping.md      # OWASP → garak → 本工具 完整映射表
+├── profile/  profile_g3/  profile_owasp/   # 扫描产物示例
 └── README.md
 ```
 
@@ -33,11 +36,11 @@ attack_pack/
 
 | 维度 | garak 全量 | 本引擎（精英包） |
 |---|---|---|
-| 探测面 | 176 探针 | 12 精英攻击 |
-| 单模型尝试次数 | ~26k 次（两批） | 36 次（12×3） |
+| 探测面 | 176 探针 | 24 精英攻击（OWASP 全覆盖） |
+| 单模型尝试次数 | ~26k 次（两批） | 72 次（24×3） |
 | detector | 跑模型判定（额外调用） | 本地关键词（0 额外调用） |
 | token / 费用 | ¥11+（DeepSeek 官方） | 几毛钱量级 |
-| 产出 | 完整 but 慢/贵 | 快速画像 + 利用链 |
+| 产出 | 完整 but 慢/贵 | 快速画像 + 利用链 + OWASP 覆盖度 |
 
 > token 降低约 **700×**，且只覆盖已验证有效的攻击面——新模型的"是否也有同样漏洞"一眼可见。
 
@@ -56,6 +59,10 @@ python3 redteam_engine.py --base-url https://other-api/v1 --key $KEY --model gpt
 
 # 4) 调整每攻击采样次数（提高置信度）
 python3 redteam_engine.py --key $KEY --generations 5
+
+# 5) 只测 OWASP 指定的风险类（按需缩小范围，更快）
+python3 redteam_engine.py --key $KEY --owasp LLM01,LLM05,ASI05
+python3 redteam_engine.py --key $KEY --owasp LLM02,LLM07,ASI09
 ```
 
 产物：`profile/profile.json`（机器可读）+ `profile/profile.md`（漏洞画像表 + 利用链）。
@@ -81,6 +88,30 @@ python3 redteam_engine.py --key $KEY --generations 5
 ## 扩展攻击包
 
 `build_pack.py` 从 garak 探针源码提取真实 prompt。要扩充（如加入未扫的 sysprompt_extraction / malwaregen / web_injection），改 `targets` 字典重跑即可，新攻击自动进入精英包。
+
+## 发布到 GitHub
+
+本目录所有核心文件（攻击包 + 引擎 + 映射 + 报告样例）可一键推到 `tajleonbennis-maker/redteam-elite-pack`：
+
+```bash
+gh auth login -h github.com          # 仅首次 / token 失效时需要
+python3 publish.py                   # 走 Contents API，自动处理新建/更新
+```
+
+`publish.py` 不依赖本地 git 仓库，只调 `gh` CLI，逐个文件 PUT 到 `main` 分支，并自动取远端 sha 以支持增量更新。推送清单：
+
+| 仓库路径 | 本地文件 |
+|---|---|
+| `attack_pack.json` | `attack_pack.json`（v2.0，24 攻击 + OWASP 标签） |
+| `redteam_engine.py` | 轻量引擎（`--owasp` 过滤） |
+| `format_report.py` | 报告生成（OWASP 覆盖度章节） |
+| `owasp_mapping.md` | OWASP→garak→本工具 映射表 |
+| `build_pack_v2.py` | 注入 OWASP 标签 + 新增 garak 项 |
+| `README.md` | 本文件 |
+| `examples/profile_owasp_report.md` | `profile_owasp/report.md`（覆盖度样例） |
+| `examples/profile_owasp_summary.json` | `profile_owasp/summary.json`（结构化样例） |
+
+> 若 `gh` 报 `error connecting to api.github.com`：本机若带失效系统代理，先 `unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY`；若仍连不上，说明当前环境无外网出口，需在能联网的机器上跑 `publish.py`。
 
 ## 合规说明
 
