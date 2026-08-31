@@ -28,6 +28,10 @@ def is_refusal(resp):
     return any(low.startswith(m) for m in REFUSAL_MARK)
 
 
+def vasr(v):
+    return "—" if v is None else f"{v*100:.1f}%"
+
+
 def annotate(results):
     """给每个 sample 标 fp_risk（命中但疑似拒答回声/误报）。"""
     for r in results:
@@ -46,7 +50,7 @@ def risk_level(broken_sev):
     return "low"
 
 
-def build_summary(profile):
+def build_summary(profile, pack=None):
     results = annotate(profile["results"])
     by_sev = {s: {"count": 0, "broken": 0, "attacks": []} for s in SEV_ORDER}
     broken_sev = set()
@@ -74,10 +78,11 @@ def build_summary(profile):
     return {"meta": {"generated_at": datetime.now().isoformat(timespec="seconds"),
                      "source": "redteam_engine"},
             "overview": overview, "by_severity": by_sev,
+            "owasp_coverage": build_owasp_summary(pack) if pack else {},
             "chains": profile.get("chain", [])}
 
 
-def build_report_md(profile):
+def build_report_md(profile, pack=None):
     results = annotate(profile["results"])
     L = []
     L.append(f"# 红队画像报告 — `{profile.get('model', 'target')}`")
@@ -121,7 +126,7 @@ def build_report_md(profile):
                 continue
             L.append(f"### [{SEV_RISK[sev]}] {r['name']}")
             L.append("")
-            L.append(f"- 类别 `{r['category']}` ｜ 本次 ASR **{r['asr']*100:.1f}%** ｜ 历史验证 ASR {r['validated_asr']*100:.1f}% ｜ 可利用: {'是' if r['exploitable'] else '否'}")
+            L.append(f"- 类别 `{r['category']}` ｜ 本次 ASR **{r['asr']*100:.1f}%** ｜ 历史验证 ASR {vasr(r['validated_asr'])} ｜ 可利用: {'是' if r['exploitable'] else '否'}")
             L.append("")
             L.append("**证据样本：**")
             for s in r.get("samples", []):
@@ -138,7 +143,7 @@ def build_report_md(profile):
     unbroken = [r for r in results if r["asr"] <= 0]
     if unbroken:
         for r in unbroken:
-            L.append(f"- [{SEV_RISK[r['severity']]}] {r['name']} — 本次 0%（历史验证 {r['validated_asr']*100:.1f}%）")
+            L.append(f"- [{SEV_RISK[r['severity']]}] {r['name']} — 本次 0%（历史验证 {vasr(r['validated_asr'])}）")
     else:
         L.append("- 无")
     L.append("")
@@ -162,22 +167,61 @@ def build_report_md(profile):
     L.append("- **判定方式**：本地关键词 detector（非模型二次判定），命中即记 `broke`；速度快、零额外 token，但存在误报。")
     L.append("- **⚠️ 疑似误报**：证据样本中凡回应为拒答句式却被判命中者，已标 `疑似误报(拒答回声)`，其 ASR 偏高需谨慎采信（见上文明细）。")
     L.append("- **样本量**：本次每攻击仅 1–4 次尝试，ASR 方差较大；如需稳定数值请提高 `--generations`。")
-    L.append("- **历史验证 ASR**：来自此前在 DeepSeek 上的大规模 garak 扫描（多样本），作基线参考。")
+    L.append("- **历史验证 ASR**：来自此前在 DeepSeek 上的大规模 garak 扫描（多样本），作基线参考；标注 `—` 者为新提取未验证项。")
     L.append("")
+
+    # 七、OWASP 覆盖度
+    if pack is not None:
+        L.append("## 七、OWASP Top 10 覆盖度")
+        L.append("")
+        results = {r["id"]: r for r in profile["results"]}
+        rows = {}
+        for a in pack.get("attacks", []):
+            for o in a.get("owasp", []):
+                r = results.get(a["id"])
+                rows.setdefault(o, []).append((a["name"], r["asr"] if r else None))
+        L.append("| 框架 | OWASP | 攻击数 | 命中数 | 代表攻击 |")
+        L.append("|---|---|---|---|---|")
+        for o in sorted(rows):
+            fam = "LLM" if o.startswith("LLM") else "ASI"
+            items = rows[o]
+            broke = sum(1 for _, a in items if a is not None and a > 0)
+            rep = "、".join(n for n, _ in items[:2])
+            L.append(f"| {fam} | {o} | {len(items)} | {broke} | {rep} |")
+        L.append("")
+        L.append("> 注：ASI03 / ASI07 / ASI10 为纯 agent 运行时风险（需工具/记忆/多 agent 环境），本轻量引擎仅打 `/v1/chat/completions`，暂未覆盖；详见 `owasp_mapping.md`。")
+        L.append("")
     return "\n".join(L)
+
+
+def build_owasp_summary(pack):
+    rows = {}
+    for a in pack.get("attacks", []):
+        for o in a.get("owasp", []):
+            rows.setdefault(o, 0)
+            rows[o] += 1
+    return {o: rows[o] for o in sorted(rows)}
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("json", help="profile.json 路径")
     p.add_argument("--out", default=None, help="输出目录（默认同 json 所在目录）")
+    p.add_argument("--pack", default=None, help="attack_pack.json 路径（用于 OWASP 覆盖度）")
     args = p.parse_args()
     with open(args.json) as f:
         profile = json.load(f)
+    pack = None
+    if args.pack:
+        with open(args.pack) as f:
+            pack = json.load(f)
+    elif os.path.exists(os.path.join(os.path.dirname(os.path.abspath(args.json)), "..", "attack_pack.json")):
+        with open(os.path.join(os.path.dirname(os.path.abspath(args.json)), "..", "attack_pack.json")) as f:
+            pack = json.load(f)
     outdir = args.out or os.path.dirname(os.path.abspath(args.json))
     os.makedirs(outdir, exist_ok=True)
-    md = build_report_md(profile)
-    summary = build_summary(profile)
+    md = build_report_md(profile, pack)
+    summary = build_summary(profile, pack)
     md_path = os.path.join(outdir, "report.md")
     sum_path = os.path.join(outdir, "summary.json")
     with open(md_path, "w") as f:
