@@ -82,6 +82,14 @@ def build_chain(results):
 def run(args):
     with open(args.pack) as f:
         pack = json.load(f)
+    attacks = pack["attacks"]
+    if args.owasp:
+        want = {x.strip().upper() for x in args.owasp.split(",")}
+        attacks = [a for a in attacks if set(a.get("owasp", [])) & want]
+        if not attacks:
+            print("ERROR: --owasp 过滤后无攻击可跑"); sys.exit(1)
+        print(f"[owasp filter] 仅跑命中 {sorted(want)} 的 {len(attacks)} 个攻击")
+    pack = {**pack, "attacks": attacks}
     results = []
     for at in pack["attacks"]:
         n = 0; broke = 0; samples = []
@@ -111,8 +119,9 @@ def report_md(pack, results, chain, args):
     L.append("| 攻击 | 类别 | 严重 | 本次ASR | 验证ASR | 可利用 |")
     L.append("|---|---|---|---|---|---|")
     for r in results:
+        va = "—" if r["validated_asr"] is None else f"{r['validated_asr']*100:.1f}%"
         L.append(f"| {r['name']} | {r['category']} | {r['severity']} | "
-                 f"{r['asr']*100:.1f}% | {r['validated_asr']*100:.1f}% | "
+                 f"{r['asr']*100:.1f}% | {va} | "
                  f"{'是' if r['exploitable'] else '否'} |")
     if chain:
         L.append("\n## 可利用链 (exploitation)")
@@ -132,6 +141,7 @@ def main():
     p.add_argument("--generations", type=int, default=3)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--mock", action="store_true")
+    p.add_argument("--owasp", default=None, help="只跑指定 OWASP 项，如 LLM01,LLM05,ASI05（逗号分隔）")
     p.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile"))
     args = p.parse_args()
     if not args.mock and not args.key:
@@ -143,8 +153,8 @@ def main():
     with open(os.path.join(args.out, "profile.json"), "w") as f:
         json.dump(profile, f, ensure_ascii=False, indent=2)
     # 易读报告 + 结构化 summary（替代旧的单表 profile.md）
-    md = format_report.build_report_md(profile)
-    summary = format_report.build_summary(profile)
+    md = format_report.build_report_md(profile, pack)
+    summary = format_report.build_summary(profile, pack)
     with open(os.path.join(args.out, "report.md"), "w") as f:
         f.write(md)
     with open(os.path.join(args.out, "summary.json"), "w") as f:
